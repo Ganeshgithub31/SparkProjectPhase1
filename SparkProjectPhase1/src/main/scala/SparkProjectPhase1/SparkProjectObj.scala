@@ -6,6 +6,14 @@ import sys.process._
 import org.apache.spark.sql._
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.functions._
+import java.time.{ZonedDateTime, ZoneId}
+import java.time.format.DateTimeFormatter
+import org.apache.spark.broadcast._
+import org.apache.spark.sql.functions.broadcast
+import java.time.{ZonedDateTime, ZoneId}
+import java.time.format.DateTimeFormatter
+import scala.io.Source
+import org.apache.spark.sql.hive.HiveContext
 
 object SparkProjectObj {
 
@@ -14,15 +22,35 @@ object SparkProjectObj {
 					val sc=new SparkContext(conf)
 					sc.setLogLevel("Error")
 
-					val spark=SparkSession.builder().getOrCreate()
+					val spark=SparkSession.builder().enableHiveSupport()
+					.config("hive.exec.dynamic.partition.mode","nonstrict").getOrCreate()
 					import spark.implicits._
+					val Hive_context =new HiveContext(sc)
+					import Hive_context.implicits._
 
-					val Avrodf=spark.read.format("com.databricks.spark.avro")
-					.load("file:///E:/Hadoop/Spark/Spark Project Phase 1/part-00000-1bd5ec9a-4ceb-448c-865f-305f43a0b8a9-c000.avro")
+					//val Avrodf=spark.read.format("com.databricks.spark.avro")
+					//.load("file:///E:/Hadoop/Spark/Spark Project Phase 1/part-00000-1bd5ec9a-4ceb-448c-865f-305f43a0b8a9-c000.avro")
+
+					val date="2021-07-03"
+					val Avrodf = spark.read.format("com.databricks.spark.avro").load(s"hdfs:/user/cloudera/$date")
+
 
 					println("====== Avro Data Read=======")
 
 					Avrodf.show(10,false)
+
+					println
+
+					val yesterday_date=ZonedDateTime.now(ZoneId.of("UTC")).minusDays(1)
+					val formatter=DateTimeFormatter.ofPattern("yyyy-MM-dd")
+					val result=formatter format yesterday_date
+
+					//val current_date = java.time.LocalDate.now
+					//val yesterday_date= current_date.minusDays(1) 
+
+					println(s"===Yesterday date is==== $yesterday_date")
+					//println(yesterday_date)
+
 
 					val url="https://randomuser.me/api/0.8/?results=200"
 					val urldata=scala.io.Source.fromURL(url).mkString
@@ -100,9 +128,10 @@ object SparkProjectObj {
 					println("========= broadcast join for Avro and API data using username====")
 
 					joindataframe.show(10,false)
+					joindataframe.printSchema()
 
 
-					val not_null_nationality_df=joindataframe.filter("Nationality is not null")
+					/*val not_null_nationality_df=joindataframe.filter("Nationality is not null")
 					println
 					println("===========NOT Null Nationality records==========")
 					not_null_nationality_df.show(5,false)
@@ -168,8 +197,48 @@ object SparkProjectObj {
 					final_notnull_df.coalesce(1).write.format("json").mode("overwrite")
 					.save("file:///E:/Hadoop/Spark/Spark Project Phase 1/final_not_null_df")
 
-					final_notnull_df.show()
+					final_notnull_df.show()*/
+
+					val adding_index_col=addColumnIndex(spark,joindataframe)
+
+					println
+					println("======== Generating Incremental Index to join dataframe======")
+
+					adding_index_col.show(10)     
+
+					println
+					println("==== removing ID columns and replace the ID column with Index column")
+
+					val replace_id_with_index=adding_index_col.withColumn("id", col("index")).drop("index")
+					replace_id_with_index.show(10)
+
+					//val maxvaldf=spark.sql("select max(id) from spark_hive_project.project_hive_table")
+
+					println
+					println("======== Adding code to retrive max id ======")
+
+					val maxvaldf=spark.sql("select coalesce(max(id),0) from spark_hive_project.project_hive_table")
+					val maxvalue=maxvaldf.rdd.map(x=>x.mkString("")).collect().mkString("").toInt
+
+					maxvaldf.show()
+
+					val finaldataframe=replace_id_with_index.withColumn("id", col("id")+maxvalue)
+
+					println
+					println("======== Data with max value adding to ID(Index) column and written to Hive table====")
+
+					finaldataframe.write.format("hive").mode("append").saveAsTable("spark_hive_project.project_hive_table")
 
 	}
+
+	def addColumnIndex(spark: SparkSession,df: DataFrame) = {
+			spark.sqlContext.createDataFrame(
+					df.rdd.zipWithIndex.map {
+					case (row, index) => Row.fromSeq(row.toSeq :+ index)
+					},
+					// Create schema for index column
+					StructType(df.schema.fields :+ StructField("index", LongType, false)))
+	}
+
 
 }
